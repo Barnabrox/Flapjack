@@ -23,6 +23,10 @@
 //  700 - Top
 // 1023 - 3v Battery Disconnected
 
+// WEDGE DUTY CYCLE (for the rc.DutyM1M2 function)
+// "Positive" duty cycle moves the wedge up
+// "Negative" duty cycle moves the wedge up
+
 // Include Libraries
 #include <ibus.h>
 #include <RoboClaw.h>
@@ -52,6 +56,15 @@ long tsStateChangeTime = 0;
 // Declare variables to hold the state of inversion
 int invOldState = 0;
 int invNewState = 0;
+
+// Declare PID variables
+int sp = 450, pv = 450, pv_old = 450;
+unsigned long t_old = 0, t_new = 0, dt = 0;
+double pid_err, pid_int, pid_der, pid_out;
+const double Kp = -250;
+const double Ki = 0;
+const double Kd = 1;
+double wedgeMotorOut;
 
 void setup() {
   
@@ -121,9 +134,40 @@ void loop() {
 
         // Wedge Control //
         //===============//
-        
-        rc.DutyM1M2(rcWedge, ConvertToDutyCycle(chData[5]), ConvertToDutyCycle(chData[5]));
-        Serial.println(analogRead(wedgePotPin));
+
+        pv_old = pv;
+        pv =  analogRead(wedgePotPin);
+
+        if (chData[5] > 1750) {sp = 500;}
+        else if (chData[5] < 1250) {sp = 400;}
+        else {sp = 450;}
+
+        t_old = t_new;
+        t_new = millis();
+        dt = t_new - t_old;
+        // pid_old = pid_err;
+        pid_err = pv - sp;
+        pid_int = pid_int + pid_err * dt;
+        pid_der = (double)(pv - pv_old) / dt;
+        pid_out = Kp*pid_err; // + Ki*pid_int + Kd*pid_der;
+
+        // wedgeMotorOut = ConvertToDutyCycle(chData[5]);
+        wedgeMotorOut = pid_out;
+        wedgeMotorOut = min(32767, wedgeMotorOut);
+        wedgeMotorOut = max(-32767, wedgeMotorOut);
+        if (pv > 600) {wedgeMotorOut = min(0, wedgeMotorOut);}
+        if (pv < 300) {wedgeMotorOut = max(0, wedgeMotorOut);}
+        rc.DutyM1M2(rcWedge, (int)wedgeMotorOut, (int)wedgeMotorOut);
+
+        Serial.print(pv); Serial.print("\t");
+        Serial.print(sp); Serial.print("\t");
+        Serial.print(Kp*pid_err); Serial.print("\t");
+        Serial.print(Ki*pid_int); Serial.print("\t");
+        Serial.print(Kd*pid_der); Serial.print("\t");
+        Serial.print(pid_out); Serial.print("\t");
+        Serial.print(dt); Serial.print("\t");
+        Serial.print(wedgeMotorOut); Serial.print("\t");
+        Serial.println();
   
         // Tooth control //
         //===============//
