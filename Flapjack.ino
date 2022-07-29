@@ -58,13 +58,20 @@ int invOldState = 0;
 int invNewState = 0;
 
 // Declare PID variables
-int sp = 450, pv = 450, pv_old = 450;
-unsigned long t_old = 0, t_new = 0, dt = 0;
-double pid_err, pid_int, pid_der, pid_out;
-const double Kp = -250;
-const double Ki = 0;
-const double Kd = 1;
+int sp = 450, pv = 450;
+unsigned long dt = 0;
+double pid_err, pid_int, pid_der, pid_out, Kp2;
+const double Kp = -150;
+const double Ki = -0.5;
+const double Kd = -3000;
 double wedgeMotorOut;
+
+// Derivative Averaging
+bool done_charging = false;
+int i=0, j=-1;
+const int hist_size = 5;
+double pv_hist[hist_size][2];
+double sumT, sumPV, aveT, avePV, devT, devPV, sumRise, sumRun;
 
 void setup() {
   
@@ -135,38 +142,88 @@ void loop() {
         // Wedge Control //
         //===============//
 
-        pv_old = pv;
-        pv =  analogRead(wedgePotPin);
+        // Adjust Set Point
+        if (chData[5] > 1750) {sp = 550;}
+        else if (chData[5] < 1250) {sp = 360;}
+        else {sp = 420;}
 
-        if (chData[5] > 1750) {sp = 500;}
-        else if (chData[5] < 1250) {sp = 400;}
-        else {sp = 450;}
+        // Increment Array Counter
+        j++; 
+        if (j >= hist_size){
+          j=0;
+          done_charging = true;
+        }
+        
+        // Read Current Time and Process Variable
+        pv_hist[j][0] = millis();
+        pv_hist[j][1] = analogRead(wedgePotPin);
 
-        t_old = t_new;
-        t_new = millis();
-        dt = t_new - t_old;
-        // pid_old = pid_err;
-        pid_err = pv - sp;
+        // If the 3v battery is disconnected, disable PID wedge control
+        // Don't re-enable until the battery has been connected for 10 loop iterations
+        if (pv_hist[j][1] == 1023){
+          done_charging = false;
+          j = 0;
+          pv_hist[j][0] = millis();
+          pv_hist[j][1] = analogRead(wedgePotPin);
+        }
+
+        // Calculate Time Elapsed
+        if (j==0) {dt = pv_hist[j][0] - pv_hist[hist_size-1][0];}
+        else {dt = pv_hist[j][0] - pv_hist[j-1][0];}
+
+        // Scale down the porpotional constant when the wedge is moving down
+        if (pid_err > 0) {Kp2 = 0.5;}
+        else {Kp2 = 1;}
+
+        // Calculate average t and pv
+        sumT = 0; sumPV = 0;
+        for (i=0; i<hist_size; i++){
+          sumT  += pv_hist[i][0];
+          sumPV += pv_hist[i][1];
+        }
+        aveT  = sumT  / hist_size;
+        avePV = sumPV / hist_size;
+
+        // Calculate best-fit derivative term
+        sumRise = 0; sumRun = 0;
+        for (i=0; i<hist_size; i++){
+          devT  = pv_hist[i][0] - aveT;
+          devPV = pv_hist[i][1] - avePV;
+          sumRise += devT * devPV;
+          sumRun  += devT * devT;
+        }
+        pid_der = sumRise/sumRun;
+
+        // Calculate the P & I terms
+        pid_err = pv_hist[j][1] - sp;
+        if (abs(pid_err) < 8) {pid_err = 0;}
         pid_int = pid_int + pid_err * dt;
-        pid_der = (double)(pv - pv_old) / dt;
-        pid_out = Kp*pid_err; // + Ki*pid_int + Kd*pid_der;
 
-        // wedgeMotorOut = ConvertToDutyCycle(chData[5]);
+        // Calculate the output of the PID loop by summing and scaling the P,I,D terms
+        pid_out = Kp*Kp2*pid_err + Ki*pid_int + Kd*pid_der;
+
         wedgeMotorOut = pid_out;
         wedgeMotorOut = min(32767, wedgeMotorOut);
         wedgeMotorOut = max(-32767, wedgeMotorOut);
         if (pv > 600) {wedgeMotorOut = min(0, wedgeMotorOut);}
         if (pv < 300) {wedgeMotorOut = max(0, wedgeMotorOut);}
-        rc.DutyM1M2(rcWedge, (int)wedgeMotorOut, (int)wedgeMotorOut);
 
-        Serial.print(pv); Serial.print("\t");
+        // Only output to the motors if the pv_hist array is full
+        if (done_charging){
+          rc.DutyM1M2(rcWedge, (int)wedgeMotorOut, (int)wedgeMotorOut);
+        }
+        else{
+          rc.DutyM1M2(rcWedge, 0, 0);
+        }
+
+        Serial.print(pv_hist[j][1]); Serial.print("\t");
         Serial.print(sp); Serial.print("\t");
-        Serial.print(Kp*pid_err); Serial.print("\t");
-        Serial.print(Ki*pid_int); Serial.print("\t");
-        Serial.print(Kd*pid_der); Serial.print("\t");
-        Serial.print(pid_out); Serial.print("\t");
-        Serial.print(dt); Serial.print("\t");
-        Serial.print(wedgeMotorOut); Serial.print("\t");
+        // Serial.print(Kp*pid_err); Serial.print("\t");
+        // Serial.print(Ki*pid_int); Serial.print("\t");
+        // Serial.print(Kd*pid_der); Serial.print("\t");
+        // Serial.print(pid_out); Serial.print("\t");
+        // Serial.print(dt); Serial.print("\t");
+        // Serial.print(wedgeMotorOut); Serial.print("\t");
         Serial.println();
   
         // Tooth control //
