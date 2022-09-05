@@ -15,20 +15,20 @@
 // Ch2, chData[1] - Right Stick Y axis
 // Ch3, chData[2] - Left Stick Y axis
 // Ch4, chData[3] - Left Stick X axis
-// Ch5, chData[4] - VRA
-// Ch6, chData[5] - VRB (wedge position)
-// Ch7, chData[6] - SWA (inversion)
-// Ch8, chData[7] - SWB (wedge operational mode {manual/automatic})
+// Ch5, chData[4] - KEY1 (wedge bumper - up)
+// Ch6, chData[5] - KEY2 (wedge bumper - down)
+// Ch7, chData[6] - SWA  (inversion)
+// Ch8, chData[7] - SWB  (wedge operational mode {manual/automatic})
 // Ch9, chData[8] - SWC
 // Ch10 chData[9] - SWD (teeth)
 
 // WEDGE RANGE
-// 1023 - 3v Battery Disconnected
-//  700 - Top of Range
-//  520 - Resting on ground (inverted)
-//  450 - Center
-//  375 - Resting on ground (standard orientation)
-//  200 - Bottom of Range
+// 1020 - Sensor Disconnected
+//  710 - Top of Range
+//  582 - Resting on ground (inverted)
+//  540 - Center
+//  500 - Resting on ground (standard orientation)
+//  400 - Bottom of Range
 
 // WEDGE DUTY CYCLE (for the rc.DutyM1M2 function)
 // "Positive" duty cycle moves the wedge up
@@ -38,7 +38,7 @@
 // TO DO //
 //=======//
 
-// 1. Test automatic wedge positioning with weights
+// Nothing
 
 //===========//
 // LIBRARIES //
@@ -62,9 +62,11 @@ const int numCh = 10;         // Number of chanels to read
 uint16_t chData[numCh];       // Holds data from the RC receiver for each of the 10 chanels
 
 // GPIO pin assignments
-int wedgePotPin = A7; // Wedge potentiometer pin
-int toothPin1 = 9;    // Tooth motor controller input 1 pin
-int toothPin2 = 10;   // Tooth motor controller input 2 pin
+const int PIN_ENC_CS = 8 ;    // Digital encoder chip select pin
+const int PIN_ENC_DATA = 11;  // Digital encoder data pin
+const int PIN_ENC_CLOCK = 12; // Digital encoder clock pin
+const int PIN_TOOTH1 = 9;     // Tooth motor controller input 1 pin
+const int PIN_TOOTH2 = 10;    // Tooth motor controller input 2 pin
 
 // Motor output variables
 int pwm_DriveMotorR = 0;
@@ -98,8 +100,8 @@ ToothSwitchPositions currToothSwitchPosition = UNDEFINED;
 
 // PID Variables
 const int ave_count = 5;    // Number of previous points used to calculate the best fit slope for the derivative term [d(pv)/dt]
-int sp = 450;               // Set Point
-int sp_prev = 450;          // previous set point
+int sp = 540;               // Set Point
+int sp_prev = 540;          // previous set point
 int pv[ave_count];          // Process Variable
 unsigned long t[ave_count]; // Time (millis)
 unsigned long dt = 0;       // Time interval; used when calculating the derivative and integral terms
@@ -114,12 +116,13 @@ unsigned long watchdogTimeout = 0;        // The last time new data arrived from
 unsigned long tsStateChangeTime = 0;      // The last time the tooth switch changed state
 unsigned long pid_int_enable_time = 0;    // The time after which to enable the integral term in the PID loop
 unsigned long lastLoopTime = 4294967295;  // The last time the 10ms loop was ran
+unsigned long move_wedge_t0 = 0;          // The time the wedge was first commanded to move in manual mode
 bool bNewReceiverData = false;            // Becomes true when new data arrives from the reciever
 
 // PID tuning constants
-const double Kp = -150;   // -150
+const double Kp = -240;   // -150
 const double Ki = -0.8;   // -0.8
-const double Kd = -3000;  // -3000
+const double Kd = -8000;  // -3000
 
 //=======//
 // SETUP //
@@ -135,17 +138,20 @@ void setup() {
   ibus_init(&ibus_data, numCh);
 
   // Set pin modes
-  pinMode(wedgePotPin, INPUT);
-  pinMode(toothPin1, OUTPUT);
-  pinMode(toothPin2, OUTPUT);
-  digitalWrite(toothPin1, HIGH);
-  digitalWrite(toothPin2, HIGH);
+  pinMode(PIN_ENC_CS, OUTPUT);
+  pinMode(PIN_ENC_DATA, INPUT);
+  pinMode(PIN_ENC_CLOCK, OUTPUT);
+  pinMode(PIN_TOOTH1, OUTPUT);
+  pinMode(PIN_TOOTH2, OUTPUT);
 
-  // Set analog reference to 3v coin cell battery
-  analogReference(EXTERNAL);
+  // Set pin inital states
+  digitalWrite(PIN_ENC_CLOCK, HIGH);
+  digitalWrite(PIN_ENC_CS, LOW);
+  digitalWrite(PIN_TOOTH1, HIGH);
+  digitalWrite(PIN_TOOTH2, HIGH);
   
   // Uncomment for debugging
-  // Serial.begin(115200);   // Start serial interface to PC (debug)
+  Serial.begin(115200);   // Start serial interface to PC (debug)
   // Serial3.begin(115200);  // Start serial interface to Bluetooth
 }
 
@@ -219,6 +225,29 @@ void loop() {
       pwm_DriveMotorR = 0;
       pwm_DriveMotorL = 0;
     }
+
+    //===================//
+    // READ WEDGE SENSOR //
+    //===================//
+
+    digitalWrite(PIN_ENC_CS, HIGH);
+    digitalWrite(PIN_ENC_CS, LOW);
+    int pv0 = 0;
+    for (int i=0; i<10; i++) {
+      digitalWrite(PIN_ENC_CLOCK, LOW);
+      digitalWrite(PIN_ENC_CLOCK, HIGH);
+      
+      byte b = digitalRead(PIN_ENC_DATA) == HIGH ? 1 : 0;
+      pv0 += b * pow(2, 10-(i+1));
+    }
+    
+    for (int i=0; i<6; i++) {
+      digitalWrite(PIN_ENC_CLOCK, LOW);
+      digitalWrite(PIN_ENC_CLOCK, HIGH);
+    }
+    
+    digitalWrite(PIN_ENC_CLOCK, LOW);
+    digitalWrite(PIN_ENC_CLOCK, HIGH);
     
     //=======//
     // WEDGE //
@@ -241,25 +270,39 @@ void loop() {
       // Read Current Time and Wedge Position (still needed for safety limits)
       j = 0;
       t[j] = millis();
-      pv[j] = analogRead(wedgePotPin);
+      pv[j] = pv0;
 
       // Initialize the PID variables for when automatic modes starts
       pid_int = 0;            // the integral term should be zero once automatic mode starts
       done_charging = false;  // pv averaging will have to recharge once automatic mode starts
 
-      // Determine if the wedge is being commanded up or down and set the speed scaling accordingly
-      if (ConvertToDutyCycle(chData[5]) > 0) {
-        manualWedgeModeSpeedScaling = manualWedgeModeSpeedScalingUp;
+      // If the wedge is being commanded up...
+      if (ConvertToDutyCycle(chData[4]) > 0) {
+        
+        // Store the time the wedge was first commanded to move up
+        if (move_wedge_t0 == 0) {
+          move_wedge_t0 = millis();
+        }
+        
+        // Slowly increase the wedge speed from zero to max speed over 500ms
+        pwm_WedgeMotors =  32767 * manualWedgeModeSpeedScalingUp * min((double)(millis() - move_wedge_t0)/1000 + 0.5, 1);
       }
+      // If the wedge is being commanded down...
+      else if (ConvertToDutyCycle(chData[5]) > 0) {
+        move_wedge_t0 = 0;
+        pwm_WedgeMotors = -32767 * manualWedgeModeSpeedScalingDown;
+      }
+      // If there is no wedge command...
       else{
-        manualWedgeModeSpeedScaling = manualWedgeModeSpeedScalingDown;
+        move_wedge_t0 = 0;
+        pwm_WedgeMotors = 0;
       }
       
       if (state == STANDARD){
-        pwm_WedgeMotors =  manualWedgeModeSpeedScaling * ConvertToDutyCycle(chData[5]);
+        pwm_WedgeMotors =   1 * pwm_WedgeMotors;
       }
       else if (state == INVERTED){
-        pwm_WedgeMotors = -manualWedgeModeSpeedScaling * ConvertToDutyCycle(chData[5]);
+        pwm_WedgeMotors = -1 * pwm_WedgeMotors;
       }
       else{
         pwm_WedgeMotors = 0;
@@ -275,30 +318,30 @@ void loop() {
       // STANDARD
       if (state == STANDARD){
         // Adjust Set Point (standard orientation)
-        if (chData[5] > 1750) {sp = 550;}       // High
-        else if (chData[5] < 1250) {sp = 365;}  // Low
-        else {sp = 420;}                        // Mid
+        if (chData[4] > 1500) {sp = 600;}       // High
+        else if (chData[5] > 1500) {sp = 490;}  // Low
+        else {sp = 520;}                        // Mid
       }
       // INVERTED
       else if (state == INVERTED){
         // Adjust Set Point (inverted orientation)
-        if (chData[5] > 1750) {sp = 360;}       // High (when the robot is upside down)
-        else if (chData[5] < 1250) {sp = 530;}  // Low
-        else {sp = 480;}                        // Mid
+        if (chData[4] > 1500) {sp = 500;}       // High (when the robot is upside down)
+        else if (chData[5] > 1500) {sp = 590;}  // Low
+        else {sp = 570;}                        // Mid
       }
       // ERROR CASE
       else {
-        sp = 450;
+        sp = 540;
       }
       
       // Read Current Time and Wedge Position
       j++; if (j >= ave_count){j=0; done_charging = true;}
       t[j] = millis();
-      pv[j] = analogRead(wedgePotPin);
+      pv[j] = pv0;
       
-      // If the 3v battery is disconnected, disable PID wedge control
-      // Don't re-enable until the battery has been connected for [ave_count] loop iterations
-      if (pv[j] == 1023){
+      // If the digital encoder is disconnected, disable PID wedge control
+      // Don't re-enable until the encoder has been connected for [ave_count] loop iterations
+      if (pv[j] == 1020){
         done_charging = false;
         j = 0;
       }
@@ -328,7 +371,7 @@ void loop() {
       
       // Calculate the P & I terms
       pid_err = pv[j] - sp;
-      if (abs(pid_err) < 5) {pid_err = 0;}
+      if (abs(pid_err) < 3) {pid_err = 0;}
       pid_int = pid_int + pid_err * dt;
 
       // Cap the integral term so it can't drive the motors over 100%
@@ -338,7 +381,7 @@ void loop() {
       // If the set point changed, disable the integral term for the specified amount of time
       if (sp != sp_prev or prev_wedgeMode != AUTOMATIC){
         pid_int = 0;
-        pid_int_enable_time = millis() + 100;
+        pid_int_enable_time = millis() + 30;
       }
       else if (millis() < pid_int_enable_time) {
         pid_int = 0;
@@ -356,6 +399,7 @@ void loop() {
       
       // Calculate the output of the PID loop by summing and scaling the P,I,D terms
       pwm_WedgeMotors = Kp*Kp2*pid_err + Ki*pid_int + Kd*pid_der;
+      //pwm_WedgeMotors = Kp*Kp2*pid_err + Ki*pid_int;
       
       // Only output to the motors if the pv array is full
       if (not done_charging){
@@ -438,12 +482,12 @@ void loop() {
     if (safety_override == false) {
       
       // Taper the max wedge speed down to zero near the ends of the range of travel
-      if (pv[j] > 550 and pv[j] <= 600) {pwm_WedgeMotors = min(32767*(double)(600-pv[j])/50, pwm_WedgeMotors);}
-      if (pv[j] < 350 and pv[j] >= 300) {pwm_WedgeMotors = max(32767*(double)(300-pv[j])/50, pwm_WedgeMotors);}
+      if (pv[j] > 620 and pv[j] <= 650) {pwm_WedgeMotors = min(32767*(double)(650-pv[j])/30, pwm_WedgeMotors);}
+      if (pv[j] < 490 and pv[j] >= 460) {pwm_WedgeMotors = max(32767*(double)(460-pv[j])/30, pwm_WedgeMotors);}
       
       // Disable the wedge motors at the top and bottom of the range of travel
-      if (pv[j] > 600) {pwm_WedgeMotors = min(0, pwm_WedgeMotors);}
-      if (pv[j] < 300) {pwm_WedgeMotors = max(0, pwm_WedgeMotors);}
+      if (pv[j] > 650) {pwm_WedgeMotors = min(0, pwm_WedgeMotors);}
+      if (pv[j] < 460) {pwm_WedgeMotors = max(0, pwm_WedgeMotors);}
       
     }
     
@@ -473,25 +517,25 @@ void loop() {
     
     // Teeth
     if (toothMotorCommand == RAISE){
-      digitalWrite(toothPin1, HIGH);
-      digitalWrite(toothPin2, LOW);
+      digitalWrite(PIN_TOOTH1, HIGH);
+      digitalWrite(PIN_TOOTH2, LOW);
     }
     else if (toothMotorCommand == LOWER) {
-      digitalWrite(toothPin1, LOW);
-      digitalWrite(toothPin2, HIGH);
+      digitalWrite(PIN_TOOTH1, LOW);
+      digitalWrite(PIN_TOOTH2, HIGH);
     }
     else{
-      digitalWrite(toothPin1, HIGH);
-      digitalWrite(toothPin2, HIGH);
+      digitalWrite(PIN_TOOTH1, HIGH);
+      digitalWrite(PIN_TOOTH2, HIGH);
     }
     
     //=======//
     // DEBUG //
     //=======//
 
-    // Serial.print(pv[j]); Serial.print("\t");
-    // Serial.print(sp); Serial.print("\t");
-    // Serial.println();
+    Serial.print(pv[j]); Serial.print("\t");
+    Serial.print(sp); Serial.print("\t");
+    Serial.println();
   }
 }
 //==================//
